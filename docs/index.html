@@ -1,0 +1,32 @@
+<!doctype html>
+<html>
+  <body style="font-family:system-ui;max-width:720px;margin:16px auto;">
+    <h3>LLM Chat</h3>
+    <textarea id="p" rows="4" style="width:100%;" placeholder="Ask something…"></textarea>
+    <div style="margin-top:8px;">
+      <button id="send">Send</button>
+      <span id="status"></span>
+    </div>
+    <pre id="out" style="white-space:pre-wrap;background:#f6f7f9;padding:12px;border-radius:8px;margin-top:12px;"></pre>
+    <script>
+      const endpoint = 'https://YOUR-API/chat'; // your backend
+      const apiKey = ''; // avoid for prod; use proper auth
+      document.getElementById('send').onclick = async () => {
+        const out = document.getElementById('out');
+        const status = document.getElementById('status');
+        out.textContent = ''; status.textContent = '…';
+        try {
+          const r = await fetch(endpoint, {
+            method: 'POST',
+            headers: {'Content-Type':'application/json', ...(apiKey?{'Authorization':'Bearer '+apiKey}:{})},
+            body: JSON.stringify({ messages:[{role:'user', content: document.getElementById('p').value }] })
+          });
+          if (!r.ok) throw new Error(r.status+' '+r.statusText);
+          const data = await r.json();
+          out.textContent = data?.content ?? JSON.stringify(data,null,2);
+        } catch (e) { out.textContent = 'Error: ' + e.message; }
+        finally { status.textContent = ''; }
+      };
+    </script>
+  </body>
+</html>
