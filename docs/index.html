@@ -1,32 +1,318 @@
 <!doctype html>
 <html>
-  <body style="font-family:system-ui;max-width:720px;margin:16px auto;">
-    <h3>LLM Chat</h3>
-    <textarea id="p" rows="4" style="width:100%;" placeholder="Ask something…"></textarea>
-    <div style="margin-top:8px;">
-      <button id="send">Send</button>
-      <span id="status"></span>
+  <head>
+    <meta charset="utf-8" />
+    <title>LLM Chat — Intelligence Hub</title>
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <!-- Local UMD build of SignalR -->
+    <script src="./public/js/signalr.min.js"></script>
+    <style>
+      :root{
+        --bg:#0b0f13; --panel:#141a21; --muted:#96a3b1; --text:#e8eef5; --primary:#2f7dff;
+        --accent:#1e6bff; --user:#1f2937; --assistant:#0f2653; --border:#232b35;
+      }
+      *{box-sizing:border-box}
+      html,body{height:100%}
+      body{
+        margin:0; font-family:ui-sans-serif,system-ui,Segoe UI,Roboto,Helvetica,Arial;
+        background:linear-gradient(180deg,#0a0e12, #0f151c 30%, #0a0e12);
+        color:var(--text); display:flex; justify-content:center; padding:24px;
+      }
+      .app{
+        width:min(960px,100%); display:flex; flex-direction:column; gap:12px;
+      }
+      .card{
+        background:var(--panel); border:1px solid var(--border); border-radius:16px;
+        box-shadow:0 10px 30px rgba(0,0,0,.25); overflow:hidden;
+      }
+      header{
+        display:flex; align-items:center; justify-content:space-between; padding:14px 16px;
+        border-bottom:1px solid var(--border);
+      }
+      header .title{font-weight:600}
+      header .status{font-size:12px; color:var(--muted)}
+      .messages{
+        height:60vh; overflow:auto; padding:16px; display:flex; flex-direction:column; gap:10px;
+        background:
+          radial-gradient(1200px 1200px at 80% -20%, rgba(47,125,255,.06), transparent 60%),
+          radial-gradient(1000px 1000px at -20% 120%, rgba(47,125,255,.05), transparent 60%);
+      }
+      .bubble{
+        max-width:80%; padding:12px 14px; border-radius:14px; line-height:1.4; white-space:pre-wrap;
+        border:1px solid var(--border);
+      }
+      .row{display:flex; gap:8px; align-items:flex-end}
+      .user{justify-content:flex-end}
+      .user .bubble{background:var(--user)}
+      .assistant .bubble{background:var(--assistant)}
+      .meta{font-size:11px; color:var(--muted); margin-top:6px}
+      .inputRow{
+        display:flex; gap:10px; padding:12px; border-top:1px solid var(--border); background:var(--panel)
+      }
+      textarea{
+        flex:1; resize:vertical; min-height:48px; max-height:30vh; padding:12px 12px;
+        border-radius:10px; border:1px solid var(--border); background:#0c1016; color:var(--text);
+      }
+      button{
+        padding:12px 16px; border-radius:10px; border:1px solid var(--border);
+        background:linear-gradient(180deg,var(--primary), var(--accent)); color:white; font-weight:600;
+        cursor:pointer; transition:.15s transform ease;
+      }
+      button:disabled{opacity:.5; cursor:not-allowed}
+      button:active{transform:translateY(1px)}
+      .toolbar{display:flex; gap:8px; align-items:center}
+      .pill{font-size:12px; padding:4px 8px; border-radius:999px; border:1px solid var(--border); color:var(--muted)}
+      .small{font-size:12px}
+      code, .mono{font-family:ui-monospace,SFMono-Regular,Consolas,monospace}
+      .system{align-self:center; color:var(--muted); font-size:12px}
+      .blink{animation: blink 1s steps(2,start) infinite}
+      @keyframes blink { to { visibility: hidden; } }
+      a{color:#a5c4ff}
+    </style>
+  </head>
+  <body>
+    <div class="app card">
+      <header>
+        <div>
+          <div class="title">Intelligence Hub — Chat</div>
+          <div class="small" id="profileNameView"></div>
+        </div>
+        <div class="toolbar">
+          <span class="pill" id="statusPill">disconnected</span>
+          <button id="connectBtn">Connect</button>
+          <button id="disconnectBtn" disabled>Disconnect</button>
+        </div>
+      </header>
+
+      <div id="messages" class="messages"></div>
+
+      <div class="inputRow">
+        <textarea id="prompt" placeholder="Ask something… (Shift+Enter for newline, Enter to send)"></textarea>
+        <button id="sendBtn" disabled>Send</button>
+      </div>
     </div>
-    <pre id="out" style="white-space:pre-wrap;background:#f6f7f9;padding:12px;border-radius:8px;margin-top:12px;"></pre>
+
     <script>
-      const endpoint = 'https://YOUR-API/chat'; // your backend
-      const apiKey = ''; // avoid for prod; use proper auth
-      document.getElementById('send').onclick = async () => {
-        const out = document.getElementById('out');
-        const status = document.getElementById('status');
-        out.textContent = ''; status.textContent = '…';
+      /*************************************
+       *  CONSTANTS — fill these in once  *
+       *************************************/
+      const HUB_URL      = 'https://intelligencehub-managed.azurewebsites.net/ChatStream'; // your hub
+      const API_KEY      = '08xEC6QUfUBupeGLlaLEYvj3kcUEGnDtywXK/YMT7AA='; // X-Api-Key; do NOT hardcode in prod
+      const CHAT_PROFILE = 'Test';     // must exist server-side
+
+      // Hub method & event names (per ChatHub)
+      const HUB_METHOD_SEND     = 'Send';
+      const HUB_EVENT_BROADCAST = 'broadcastMessage';
+
+      // Compose a minimal request (aligned to your React sample)
+      function composeRequest(userText) {
+        return {
+          conversationId: null,
+          profileOptions: { name: CHAT_PROFILE },
+          messages: [{ role: 'user', content: userText }]
+        };
+      }
+
+      /**********************
+       *  UI / State logic  *
+       **********************/
+      const $msgs = document.getElementById('messages');
+      const $prompt = document.getElementById('prompt');
+      const $send = document.getElementById('sendBtn');
+      const $connect = document.getElementById('connectBtn');
+      const $disconnect = document.getElementById('disconnectBtn');
+      const $status = document.getElementById('statusPill');
+      const $profileNameView = document.getElementById('profileNameView');
+
+      // No persistence
+      try { localStorage.removeItem('ih.chat.history'); } catch {}
+      $profileNameView.textContent = `Profile: ${CHAT_PROFILE}`;
+
+      function timeNow(){
+        const d=new Date(); return d.toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'});
+      }
+
+      function addSystem(text){
+        const div=document.createElement('div');
+        div.className='system'; div.textContent=text; $msgs.appendChild(div); $msgs.scrollTop=$msgs.scrollHeight;
+      }
+
+      function addBubble(role, text, {streaming=false}={}){
+        const row=document.createElement('div');
+        row.className = 'row ' + (role==='user' ? 'user' : 'assistant');
+        const bubble=document.createElement('div');
+        bubble.className='bubble'; bubble.textContent=text || '';
+        row.appendChild(bubble);
+        const meta=document.createElement('div');
+        meta.className='meta'; meta.textContent=`${role} • ${timeNow()}`;
+        const wrap=document.createElement('div');
+        wrap.appendChild(row); wrap.appendChild(meta);
+        $msgs.appendChild(wrap);
+        $msgs.scrollTop=$msgs.scrollHeight;
+
+        if(streaming){
+          const cursor=document.createElement('span'); cursor.className='blink'; cursor.textContent='▍';
+          bubble.appendChild(cursor);
+          return {bubble, cursor};
+        }
+        return {bubble, cursor:null};
+      }
+
+      function updateStreaming(streamRef, chunkText){
+        if(!streamRef) return;
+        const {bubble, cursor} = streamRef;
+        if(cursor) cursor.remove();
+        bubble.textContent += chunkText ?? '';
+        if(cursor) bubble.appendChild(cursor);
+        $msgs.scrollTop=$msgs.scrollHeight;
+      }
+
+      function appendImage(streamRef, base64){
+        if(!streamRef || !base64) return;
+        const {bubble, cursor} = streamRef;
+        if(cursor) cursor.remove();
+        const img = document.createElement('img');
+        img.src = 'data:image/png;base64,' + base64; // assume PNG; adjust if you send a type field
+        img.style.display = 'block';
+        img.style.maxWidth = '100%';
+        img.style.marginTop = '8px';
+        bubble.appendChild(img);
+        if(cursor) bubble.appendChild(cursor);
+        $msgs.scrollTop=$msgs.scrollHeight;
+      }
+
+      function endStreaming(streamRef){
+        if(streamRef?.cursor) streamRef.cursor.remove();
+      }
+
+      /*****************
+       *  SignalR init *
+       *****************/
+      let connection = null;
+
+      function setConnected(yes){
+        $status.textContent = yes ? 'connected' : 'disconnected';
+        $send.disabled = !yes;
+        $disconnect.disabled = !yes;
+        $connect.disabled = yes;
+      }
+
+      // parse any incoming payload and extract completionUpdate text
+      function handleIncoming(raw){
+        if (!_currentStream) _currentStream = addBubble('assistant','', { streaming:true });
+
         try {
-          const r = await fetch(endpoint, {
-            method: 'POST',
-            headers: {'Content-Type':'application/json', ...(apiKey?{'Authorization':'Bearer '+apiKey}:{})},
-            body: JSON.stringify({ messages:[{role:'user', content: document.getElementById('p').value }] })
-          });
-          if (!r.ok) throw new Error(r.status+' '+r.statusText);
-          const data = await r.json();
-          out.textContent = data?.content ?? JSON.stringify(data,null,2);
-        } catch (e) { out.textContent = 'Error: ' + e.message; }
-        finally { status.textContent = ''; }
-      };
+          // 1) If server sent a string: try to parse JSON, else treat as plain text
+          let data = raw;
+          if (typeof raw === 'string') {
+            const t = raw.trim();
+            if (t.startsWith('{') || t.startsWith('[')) {
+              try { data = JSON.parse(t); }
+              catch { data = t; } // not valid JSON -> append as-is
+            } else {
+              data = t;
+            }
+          }
+
+          // 2) If object with completionUpdate, append just that
+          if (data && typeof data === 'object') {
+            // stream text
+            if (typeof data.completionUpdate === 'string' && data.completionUpdate.length) {
+              updateStreaming(_currentStream, data.completionUpdate);
+            }
+            // stream image (optional)
+            if (typeof data.base64Image === 'string' && data.base64Image.length) {
+              appendImage(_currentStream, data.base64Image);
+            }
+            // NOTE: your chunks also include role, finishReason, toolCalls, toolExecutionResponses
+            // If you later want to render those, you can extend this function.
+            return;
+          }
+
+          // 3) If plain string (e.g., "Response Status: 401 ..."), just append
+          if (typeof data === 'string' && data.length) {
+            updateStreaming(_currentStream, data);
+            return;
+          }
+
+        } catch (e) {
+          updateStreaming(_currentStream, `\n[client parse error] ${e.message}`);
+        }
+      }
+
+      async function connect(){
+        if(connection) return;
+        $status.textContent='connecting…';
+
+        // Force LongPolling so the browser can send custom headers (X-Api-Key)
+        connection = new signalR.HubConnectionBuilder()
+          .withUrl(HUB_URL, {
+            transport: signalR.HttpTransportType.LongPolling,
+            headers: { 'X-Api-Key': API_KEY }
+          })
+          .withAutomaticReconnect()
+          .configureLogging(signalR.LogLevel.Information)
+          .build();
+
+        // Your hub emits "broadcastMessage"
+        connection.on(HUB_EVENT_BROADCAST, handleIncoming);
+
+        connection.onclose(() => { setConnected(false); addSystem('connection closed'); });
+
+        try {
+          await connection.start();
+          setConnected(true);
+          addSystem('connected to hub');
+        } catch (e) {
+          setConnected(false);
+          addSystem('connect failed: ' + e.message);
+          console.error(e);
+        }
+      }
+
+      async function disconnect(){
+        if(!connection) return;
+        try{ await connection.stop(); } finally {
+          connection = null; setConnected(false);
+        }
+      }
+
+      /****************
+       *  Send logic  *
+       ****************/
+      let _currentStream = null;
+
+      async function sendMessage(){
+        const text = $prompt.value.trim();
+        if(!text || !connection) return;
+
+        addBubble('user', text);
+        _currentStream = addBubble('assistant', '', {streaming:true});
+        $prompt.value = '';
+
+        try{
+          const req = composeRequest(text);
+          await connection.invoke(HUB_METHOD_SEND, req); // replies stream via "broadcastMessage"
+        }catch(e){
+          updateStreaming(_currentStream, `\n[client error] ${e.message}`);
+          endStreaming(_currentStream);
+          _currentStream = null;
+        }
+      }
+
+      // UI events
+      document.getElementById('connectBtn').addEventListener('click', connect);
+      document.getElementById('disconnectBtn').addEventListener('click', disconnect);
+      document.getElementById('sendBtn').addEventListener('click', sendMessage);
+      document.getElementById('prompt').addEventListener('keydown', (e)=>{
+        if(e.key==='Enter' && !e.shiftKey){
+          e.preventDefault();
+          document.getElementById('sendBtn').click();
+        }
+      });
+
+      // Optional: auto-connect on load
+      connect();
     </script>
   </body>
 </html>
